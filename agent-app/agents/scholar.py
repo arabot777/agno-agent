@@ -22,17 +22,25 @@ def get_scholar(
         additional_context += f"You are interacting with the user: {user_id}"
         additional_context += "</context>"
 
-    model_id = model_id or agent_settings.gpt_4_mini
+    model_id = model_id or agent_settings.qwen_max
 
     return Agent(
         name="Scholar",
         agent_id="scholar",
         user_id=user_id,
         session_id=session_id,
-        model=OpenAIChat(
+        # model=OpenAIChat(
+        #     id=model_id,
+        #     max_completion_tokens=agent_settings.default_max_completion_tokens,
+        #     temperature=agent_settings.default_temperature if model_id != "o3-mini" else None,
+        # ),
+        model=OpenAIChat(  # OpenAIChat 支持兼容接口
             id=model_id,
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",  # 千问 API 地址
+            api_key="sk-53b7f9ed398b41b4bc265e1d3172334d",  # 使用千问 API Key
             max_completion_tokens=agent_settings.default_max_completion_tokens,
-            temperature=agent_settings.default_temperature if model_id != "o3-mini" else None,
+            temperature=agent_settings.default_temperature,
+            role_map={"system": "system", "user": "user", "assistant": "assistant", "tool": "tool"},
         ),
         # Tools available to the agent
         tools=[DuckDuckGoTools()],

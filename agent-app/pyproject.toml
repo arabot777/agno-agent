@@ -26,6 +26,7 @@ dependencies = [
   "aiofiles",
   "newspaper4k",
   "lxml_html_clean",
+  "wavespeed-mcp",
 ]
 
 [project.optional-dependencies]
