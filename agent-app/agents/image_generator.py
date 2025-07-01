@@ -1,4 +1,3 @@
-import asyncio
 import os
 from textwrap import dedent
 from typing import Optional
@@ -14,114 +13,83 @@ from db.session import db_url
 
 class ImageGeneratorAgent(Agent):
     """
-    图像生成Agent - 内置WaveSpeed MCP功能
+    图像生成Agent - 支持运行时动态MCP初始化
     
-    这是一个完整的、可以直接使用的图像生成Agent，支持：
-    - 真实图像生成（通过WaveSpeed MCP）
-    - 智能提示词优化
-    - 多种艺术风格
-    - 会话历史管理
+    这个Agent会在首次使用时自动检测和初始化MCP连接，
+    完美解决了Web框架中的MCP生命周期管理问题。
     """
     
-    def __init__(self, auto_setup_mcp: bool = True, **kwargs):
-        self.auto_setup_mcp = auto_setup_mcp
-        self.mcp_tools = None
+    def __init__(self, **kwargs):
+        self._mcp_tools = None
         self._mcp_initialized = False
         super().__init__(**kwargs)
     
-    async def setup_mcp(self, retry_count=0):
-        """设置MCP连接，支持智能重试和参数调整"""
+    async def _ensure_mcp_ready(self):
+        """确保MCP连接就绪 - 动态初始化"""
         if self._mcp_initialized:
             return
             
         api_key = os.getenv("WAVESPEED_API_KEY")
         if not api_key:
-            print("⚠️  警告：未设置 WAVESPEED_API_KEY，仅提供概念指导功能")
-            print("   要启用图像生成，请设置：export WAVESPEED_API_KEY=your_key")
+            print("💡 提示：设置 WAVESPEED_API_KEY 可启用真实图像生成功能")
+            self._mcp_initialized = True  # 标记为已检查，避免重复提示
             return
-        
-        # 根据重试次数调整参数
-        timeout_seconds = 30 + (retry_count * 10)  # 首次30秒，重试时增加
-        max_retries = 2
-        
+            
         try:
-            # 设置渐进式超时，适应网络状况
-            print(f"🔗 正在连接图像生成服务（超时时间: {timeout_seconds}秒）...")
-            self.mcp_tools = MCPTools(
-                command="wavespeed-mcp", 
-                timeout_seconds=timeout_seconds,
-                # 添加环境变量，可能有助于稳定连接
+            print("🔗 正在初始化图像生成服务...")
+            self._mcp_tools = MCPTools(
+                command="wavespeed-mcp",
+                timeout_seconds=30,
                 env={"WAVESPEED_API_KEY": api_key}
             )
-            await self.mcp_tools.__aenter__()
-            self.tools = [self.mcp_tools]
-            self._mcp_initialized = True
-            print(f"✅ 图像生成服务连接成功（超时时间: {timeout_seconds}秒）")
-        except Exception as e:
-            error_msg = str(e).lower()
-            print(f"⚠️  连接失败（第{retry_count + 1}次尝试）：{e}")
+            await self._mcp_tools.__aenter__()
             
-            # 如果是连接或超时问题，且还有重试机会
-            if retry_count < max_retries and any(keyword in error_msg for keyword in [
-                "timeout", "connection", "closed", "resource"
-            ]):
-                print(f"   🔄 {3-retry_count}秒后重试连接...")
-                await asyncio.sleep(3)
-                return await self.setup_mcp(retry_count + 1)
-            else:
-                print("   将提供概念指导功能")
-    
-    async def cleanup_mcp(self):
-        """清理MCP连接"""
-        if self.mcp_tools:
-            try:
-                await self.mcp_tools.__aexit__(None, None, None)
-            except Exception:
-                pass
-            self.mcp_tools = None
-            self._mcp_initialized = False
+            # 动态添加MCP工具到agent
+            if self._mcp_tools not in self.tools:
+                self.tools.append(self._mcp_tools)
+            
+            self._mcp_initialized = True
+            print("✅ 图像生成服务已就绪，支持真实图像生成")
+            
+        except Exception as e:
+            print(f"⚠️  图像生成服务初始化失败：{e}")
+            print("   将提供概念指导和提示词优化服务")
+            self._mcp_initialized = True  # 标记为已尝试
     
     async def arun(self, message: str, **kwargs):
-        """运行Agent，自动处理MCP设置和错误恢复"""
-        if self.auto_setup_mcp and not self._mcp_initialized:
-            await self.setup_mcp()
+        """运行Agent，首次使用时自动初始化MCP"""
+        # 动态初始化MCP（如果需要且尚未初始化）
+        if not self._mcp_initialized:
+            await self._ensure_mcp_ready()
         
         try:
             return await super().arun(message, **kwargs)
         except Exception as e:
-            # 智能错误处理和参数调整
+            # 处理MCP连接相关错误
             error_str = str(e).lower()
-            
-            # MCP连接相关错误
             if any(keyword in error_str for keyword in [
                 "closedresourceerror", "mcp", "wavespeed", "connection", 
-                "timeout", "failed to call", "timed out"
+                "timeout", "failed to call", "closed", "resource"
             ]):
-                print(f"⚠️  图像生成服务暂时不可用：{e}")
-                print("   自动切换到概念指导模式...")
+                print("🔄 图像生成服务连接中断，重新建立连接中...")
                 
-                # 重置MCP连接状态
-                await self.cleanup_mcp()
-                self.tools = []
+                # 重置状态并重新初始化
+                self._mcp_initialized = False
+                if self._mcp_tools in self.tools:
+                    self.tools.remove(self._mcp_tools)
+                self._mcp_tools = None
                 
-                # 尝试重新初始化（如果失败会继续使用概念指导模式）
-                try:
-                    await self.setup_mcp()
-                except Exception:
-                    pass  # 忽略重新初始化失败，继续使用概念指导
+                # 重新尝试初始化
+                await self._ensure_mcp_ready()
                 
-                return await super().arun(message, **kwargs)
+                # 重新运行请求
+                if self._mcp_initialized and self._mcp_tools:
+                    return await super().arun(message, **kwargs)
+                else:
+                    print("   切换到概念指导模式继续服务...")
+                    return await super().arun(message, **kwargs)
+            
             raise
-    
-    async def __aenter__(self):
-        """异步上下文管理器入口"""
-        if self.auto_setup_mcp:
-            await self.setup_mcp()
-        return self
-    
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """异步上下文管理器出口"""
-        await self.cleanup_mcp()
 
 
 def get_image_generator(
@@ -129,29 +97,35 @@ def get_image_generator(
     user_id: Optional[str] = None,
     session_id: Optional[str] = None,
     debug_mode: bool = True,
-    auto_setup_mcp: bool = True,
 ) -> ImageGeneratorAgent:
     """
-    创建图像生成Agent - 内置MCP功能，开箱即用
+    创建图像生成Agent - 按照Agno官方最佳实践
+    
+    注意：按照官方文档建议，MCP工具应在应用层管理，而不是在Agent内部。
     
     Args:
         model_id: 模型ID
         user_id: 用户ID  
         session_id: 会话ID
         debug_mode: 调试模式
-        auto_setup_mcp: 是否自动设置MCP（默认True）
     
     Returns:
         ImageGeneratorAgent: 图像生成Agent实例
         
     Usage:
-        # 直接使用（推荐）
-        agent = get_image_generator()
-        response = await agent.arun("生成一张猫的图片")
-        
-        # 使用异步上下文管理器
-        async with get_image_generator() as agent:
+        # 在应用层使用MCP（推荐的官方方式）
+        async with MCPTools(command="wavespeed-mcp") as mcp_tools:
+            agent = get_image_generator()
+            agent.tools = [mcp_tools]  # 在应用层添加MCP工具
             response = await agent.arun("生成一张猫的图片")
+        
+        # 或在Playground中使用（官方推荐）
+        async def run_server():
+            async with MCPTools(command="wavespeed-mcp") as mcp_tools:
+                agent = get_image_generator()
+                agent.tools = [mcp_tools]
+                playground = Playground(agents=[agent])
+                playground.serve(app)
     """
     
     additional_context = ""
@@ -288,13 +262,5 @@ def get_image_generator(
         num_history_responses=3,
         read_chat_history=True,
         debug_mode=debug_mode,
-        auto_setup_mcp=auto_setup_mcp,
     )
 
-
-# 为了兼容性，也提供一个简单的函数
-async def create_image_generator(**kwargs) -> ImageGeneratorAgent:
-    """异步创建图像生成Agent"""
-    agent = get_image_generator(**kwargs)
-    await agent.setup_mcp()
-    return agent 
